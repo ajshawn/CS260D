@@ -634,6 +634,7 @@ class ClassificationModel:
             show_running_loss=show_running_loss,
             eval_df=eval_df,
             verbose=verbose,
+            gradient_record_interval=self.args.gradient_record_interval or self.args.num_train_epochs,
             **kwargs,
         )
 
@@ -661,6 +662,7 @@ class ClassificationModel:
         eval_df=None,
         test_df=None,
         verbose=True,
+        gradient_record_interval=None,  # Interval for gradient recording
         **kwargs,
     ):
         """
@@ -1153,6 +1155,51 @@ class ClassificationModel:
                                             else training_progress_scores,
                                         )
                         model.train()
+
+            # Gradient recording step
+            if gradient_record_interval is not None and (epoch_number + 1) % gradient_record_interval == 0:
+                model.eval()  # Set the model to evaluation mode
+                gradient_data = []
+                # Assuming `model` is a Hugging Face Transformer model
+                with torch.no_grad():  # Regular forward pass for evaluation
+                    for idx, batch in enumerate(train_dataloader):
+                        inputs = self._get_inputs_dict(batch)
+
+                        # Ensure the model outputs hidden states
+                        outputs = model(**inputs, output_hidden_states=True)
+
+                        # Access the penultimate layer's activations from hidden_states
+                        # Note: hidden_states is a tuple where the last element is the final layer's input
+                        # and the second-to-last element is the penultimate layer's output
+                        penultimate_activations = outputs.hidden_states[-2]  # Second-to-last layer
+                        penultimate_activations.requires_grad_(True)  # Enable gradient tracking
+
+                        logits = outputs.logits  # Final layer outputs (classification/regression scores)
+                        labels = inputs["labels"]
+
+                        # Compute the loss
+                        loss_fn = self.loss_fct if self.loss_fct else torch.nn.CrossEntropyLoss()
+                        loss = loss_fn(logits, labels)
+
+                        # Compute gradients w.r.t. the penultimate layer activations
+                        gradients = torch.autograd.grad(
+                            outputs=loss,
+                            inputs=penultimate_activations,
+                            grad_outputs=torch.ones_like(loss),
+                            create_graph=False,
+                            retain_graph=False,
+                        )
+
+                        # Store the gradients and corresponding data points
+                        gradient_data.append({
+                            "index_id": idx,
+                            "data_point": inputs.cpu().numpy(),
+                            "penultimate_activation": penultimate_activations.cpu().numpy(),
+                            "gradient": gradients[0].cpu().numpy(),  # Gradients w.r.t. penultimate layer
+                        })
+
+                # Save or log the gradients for further analysis
+                logger.info(f"Gradients recorded at epoch {epoch_number + 1}: {len(gradient_data)} data points.")
 
             epoch_number += 1
             output_dir_current = os.path.join(
