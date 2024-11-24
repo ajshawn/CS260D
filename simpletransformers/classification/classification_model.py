@@ -1161,45 +1161,52 @@ class ClassificationModel:
                 model.eval()  # Set the model to evaluation mode
                 gradient_data = []
                 # Assuming `model` is a Hugging Face Transformer model
-                with torch.no_grad():  # Regular forward pass for evaluation
-                    for idx, batch in enumerate(train_dataloader):
-                        inputs = self._get_inputs_dict(batch)
+                for idx, batch in enumerate(train_dataloader):
+                    inputs = self._get_inputs_dict(batch)
 
-                        # Ensure the model outputs hidden states
-                        outputs = model(**inputs, output_hidden_states=True)
+                    # Ensure the model outputs hidden states
+                    outputs = model(**inputs, output_hidden_states=True)
 
-                        # Access the penultimate layer's activations from hidden_states
-                        # Note: hidden_states is a tuple where the last element is the final layer's input
-                        # and the second-to-last element is the penultimate layer's output
-                        penultimate_activations = outputs.hidden_states[-2]  # Second-to-last layer
-                        penultimate_activations.requires_grad_(True)  # Enable gradient tracking
+                    # Access the penultimate layer's activations from hidden_states
+                    # Note: hidden_states is a tuple where the last element is the final layer's input
+                    # and the second-to-last element is the penultimate layer's output
+                    penultimate_activations = outputs.hidden_states[-2]  # Second-to-last layer
+                    penultimate_activations.requires_grad_(True)  # Enable gradient tracking
 
-                        logits = outputs.logits  # Final layer outputs (classification/regression scores)
-                        labels = inputs["labels"]
+                    logits = outputs.logits  # Final layer outputs (classification/regression scores)
+                    labels = inputs["labels"]
 
-                        # Compute the loss
-                        loss_fn = self.loss_fct if self.loss_fct else torch.nn.CrossEntropyLoss()
-                        loss = loss_fn(logits, labels)
+                    # Compute the loss
+                    loss_fn = self.loss_fct if self.loss_fct else torch.nn.CrossEntropyLoss()
+                    loss = loss_fn(logits, labels)
 
-                        # Compute gradients w.r.t. the penultimate layer activations
-                        gradients = torch.autograd.grad(
-                            outputs=loss,
-                            inputs=penultimate_activations,
-                            grad_outputs=torch.ones_like(loss),
-                            create_graph=False,
-                            retain_graph=False,
-                        )
+                    # Compute gradients w.r.t. the penultimate layer activations
+                    gradients = torch.autograd.grad(
+                        outputs=loss,
+                        inputs=penultimate_activations,
+                        grad_outputs=torch.ones_like(loss),
+                        create_graph=False,
+                        retain_graph=False,
+                    )[0]  # Access the gradient tensor from the tuple
 
-                        # Store the gradients and corresponding data points
+                    # Aggregate gradients and associate them with the sentence
+                    batch_size, seq_len, hidden_dim = gradients.shape
+
+                    for b in range(batch_size):
+                        sentence_gradient = gradients[b].cpu().numpy()  # Gradients for the sentence
+                        input_sentence = inputs["input_ids"][b].cpu().numpy()  # Input IDs for the sentence
+
                         gradient_data.append({
-                            "index_id": idx,
-                            "data_point": inputs.cpu().numpy(),
-                            "penultimate_activation": penultimate_activations.cpu().numpy(),
-                            "gradient": gradients[0].cpu().numpy(),  # Gradients w.r.t. penultimate layer
+                            "index_id": f"{idx}_{b}",  # Unique identifier: batch index
+                            "data_point": input_sentence,  # Full sentence (input IDs)
+                            "gradient": sentence_gradient,  # Gradients for the sentence
                         })
 
                 # Save or log the gradients for further analysis
                 logger.info(f"Gradients recorded at epoch {epoch_number + 1}: {len(gradient_data)} data points.")
+
+                # Change the model back to training mode
+                model.train()
 
             epoch_number += 1
             output_dir_current = os.path.join(
