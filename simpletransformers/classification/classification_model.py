@@ -13,6 +13,8 @@ from dataclasses import asdict
 from multiprocessing import cpu_count
 import tempfile
 from pathlib import Path
+from collections import defaultdict
+import json
 
 from collections import Counter
 import numpy as np
@@ -135,6 +137,7 @@ from simpletransformers.losses.loss_utils import init_loss
 
 # from simpletransformers.custom_models.models import ElectraForSequenceClassification
 
+from CREST.utils.submodular import get_orders_and_weights
 
 try:
     import wandb
@@ -663,6 +666,7 @@ class ClassificationModel:
         test_df=None,
         verbose=True,
         gradient_record_interval=None,  # Interval for gradient recording
+        coreset_ratio=0.01,
         **kwargs,
     ):
         """
@@ -1158,10 +1162,10 @@ class ClassificationModel:
 
             # Gradient recording step
             if gradient_record_interval is not None and (epoch_number + 1) % gradient_record_interval == 0:
-                model.eval()  # Set the model to evaluation mode
                 gradient_data = []
+                data_counter = 0
                 # Assuming `model` is a Hugging Face Transformer model
-                for idx, batch in enumerate(train_dataloader):
+                for idx, batch in tqdm(enumerate(train_dataloader), desc="Recording gradients", disable=args.silent, total=len(train_dataloader)):
                     inputs = self._get_inputs_dict(batch)
 
                     # Ensure the model outputs hidden states
@@ -1196,17 +1200,54 @@ class ClassificationModel:
                         sentence_gradient = gradients[b].cpu().numpy()  # Gradients for the sentence
                         input_sentence = inputs["input_ids"][b].cpu().numpy()  # Input IDs for the sentence
 
+                        # Get gradient corresponding to the [CLS] token
+                        sentence_gradient = sentence_gradient[0]
+
                         gradient_data.append({
-                            "index_id": f"{idx}_{b}",  # Unique identifier: batch index
+                            "index": data_counter,  # Index ID for the sentence
                             "data_point": input_sentence,  # Full sentence (input IDs)
                             "gradient": sentence_gradient,  # Gradients for the sentence
+                            "label": labels[b].item(),  # Label for the sentence
                         })
+
+                        data_counter += 1
+
+                # Begin coreset selection with the recorded gradients
+                budget = int(coreset_ratio * len(gradient_data))
+
+                order_mg, weights_mg, order_sz, weights_sz, ordering_time, similarity_time, assignments = get_orders_and_weights(
+                    B=budget,
+                    X=np.array([d["gradient"].flatten() for d in gradient_data]),
+                    metric="cosine",
+                    y=np.array([d["label"] for d in gradient_data]),
+                )
+
+                label2coreset = defaultdict(list)
+                for coreset_ele in tqdm(order_mg, desc="Building coreset", disable=args.silent):
+                    label = gradient_data[coreset_ele]["label"]
+                    input_ids = gradient_data[coreset_ele]["data_point"]
+                    label2coreset[label].append(self.tokenizer.decode(input_ids, skip_special_tokens=True))
+
+                # Record clusters
+                core_ele2cluster = defaultdict(list)
+                for idx, assign in tqdm(enumerate(assignments), desc="Building clusters", disable=args.silent, total=len(assignments)):
+                    if assign == -1:
+                        continue
+                    core_ele2cluster[assign].append(self.tokenizer.decode(gradient_data[idx]["data_point"], skip_special_tokens=True))
+                # Decode keys
+                core_ele2cluster = {self.tokenizer.decode(gradient_data[k]["data_point"], skip_special_tokens=True): v for k, v in core_ele2cluster.items()}
+
+                # Save the coreset data
+                with open(os.path.join(output_dir, f"coreset_data_epoch_{epoch_number + 1}.json"), "w") as f:
+                    json.dump(label2coreset, f, indent=2)
+                
+                with open(os.path.join(output_dir, f"coreset_clusters_epoch_{epoch_number + 1}.json"), "w") as f:
+                    json.dump(core_ele2cluster, f, indent=2)
+                    
 
                 # Save or log the gradients for further analysis
                 logger.info(f"Gradients recorded at epoch {epoch_number + 1}: {len(gradient_data)} data points.")
 
-                # Change the model back to training mode
-                model.train()
 
             epoch_number += 1
             output_dir_current = os.path.join(
@@ -2014,7 +2055,7 @@ class ClassificationModel:
                     wrong,
                 )
         else:
-            return {**{"mcc": mcc}, **extra_metrics}, wrong
+            return {**{"mcc": mcc, "accuracy": accuracy,}, **extra_metrics}, wrong
 
     def predict(self, to_predict, multi_label=False):
         """
