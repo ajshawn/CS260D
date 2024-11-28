@@ -671,7 +671,9 @@ class ClassificationModel:
         test_df=None,
         verbose=True,
         gradient_record_interval=None,  # Interval for gradient recording
-        coreset_ratio=0.2,
+        coreset_ratio=0.1,
+        time_sleep=15,
+        time_sleep_delta=5,
         **kwargs,
     ):
         """
@@ -840,6 +842,7 @@ class ClassificationModel:
         early_stopping_counter = 0
         steps_trained_in_current_epoch = 0
         epochs_trained = 0
+        n_augmentation = 0
         current_loss = "Initializing"
 
         if args.model_name and os.path.exists(args.model_name):
@@ -996,6 +999,7 @@ class ClassificationModel:
                     output_dir=gen_output_dir,
                     api_key=open_ai_api_key,
                     n_gen=n_gen,
+                    time_sleep=time_sleep + n_augmentation * time_sleep_delta,
                 )
 
                 # Prepare new dataset
@@ -1030,6 +1034,8 @@ class ClassificationModel:
                     batch_size=self.args.train_batch_size,
                     num_workers=self.args.dataloader_num_workers,
                 )
+
+                n_augmentation += 1
 
                 # Save or log the gradients for further analysis
                 logger.info(f"Gradients recorded and data dynamically augmented for epoch {epoch_number + 1}")
