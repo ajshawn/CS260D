@@ -1,33 +1,38 @@
 import openai
 import json
 import os
+import asyncio
 from tqdm import tqdm
 import pandas as pd
 import random
+from aiohttp import ClientSession
 
 random.seed(42)
 
 emotion2label = {
-        'anger': '3',
-        'fear': '4',
-        'joy': '1',
-        'love': '2',
-        'sadness': '0',
-        'surprise': '5'
-    }
+    'anger': '3',
+    'fear': '4',
+    'joy': '1',
+    'love': '2',
+    'sadness': '0',
+    'surprise': '5'
+}
 
 class EmotionSimilarGen:
     """
-    A class for emotion sentence generation using OpenAI API.
+    A class for emotion sentence generation using OpenAI API with async batching, worker limits, and sleep intervals.
     """
 
-    def __init__(self, gen_file: str, batch_size: int, api_key: str, **kwargs):
+    def __init__(self, gen_file: str, batch_size: int, api_key: str, max_workers: int = 10, sleep_interval: int = 50, time_sleep: int = 10, **kwargs):
         """
-        Initialize with gen_file and batch size. Accepts additional parameters.
+        Initialize with gen_file, batch size, max workers, sleep interval, and sleep duration. Accepts additional parameters.
         """
         openai.api_key = api_key
         self.gen_file = gen_file
         self.batch_size = batch_size
+        self.max_workers = max_workers
+        self.sleep_interval = sleep_interval
+        self.time_sleep = time_sleep
         self.preamble = ""
         self.n_gen = kwargs.get("n_gen", 6000)
         self.n_gen_per_inference = kwargs.get("n_gen_per_inference", 5)
@@ -69,36 +74,64 @@ Now generate {self.n_gen_per_inference} sentences that are similar to the corese
 """
         return prompt
 
-    def generate_sentences(self):
+    async def _generate_query(self, session, semaphore, query):
         """
-        Use OpenAI API to generate sentences for all queries.
+        Generate sentences for a single query with semaphore control.
         """
-        results = []
-        for query in tqdm(self.queries, desc="Generating sentences"):
+        async with semaphore:
             prompt = self._formulate_prompt(query)
             try:
-                response = openai.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[
-                        {"role": "system", "content": self.preamble},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0.7,
-                    max_tokens=250,
-                )
-                # Extract generated text
-                generation = response.choices[0].message.content
-                results.append({"query": query, "generation": generation})
+                async with session.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {openai.api_key}"},
+                    json={
+                        "model": "gpt-4o-mini",
+                        "messages": [
+                            {"role": "system", "content": self.preamble},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.7,
+                        "max_tokens": 250,
+                    },
+                ) as response:
+                    data = await response.json()
+                    generation = data["choices"][0]["message"]["content"]
+                    return {"query": query, "generation": generation}
             except Exception as e:
-                print(f"Error generating for query {query}: {e}")
-                results.append({"query": query, "generation": None})
+                print(f"Error generating for query: {e} with data: {data if 'data' in locals() else None}")
+                return {"query": query, "generation": None}
+
+    async def generate_sentences(self):
+        """
+        Generate sentences for all queries in chunks with sleep intervals.
+        """
+        semaphore = asyncio.Semaphore(self.max_workers)
+        results = []
+        async with ClientSession() as session:
+            for i in tqdm(range(0, len(self.queries), self.sleep_interval), desc="Generating chunks"):
+                chunk = self.queries[i: i + self.sleep_interval]
+                tasks = [self._generate_query(session, semaphore, query) for query in chunk]
+                
+                # Process chunk
+                chunk_results = await asyncio.gather(*tasks)
+                results.extend(chunk_results)
+
+                # Pause between chunks
+                if i + self.sleep_interval < len(self.queries):
+                    print(f"Pausing for {self.time_sleep} seconds...")
+                    await asyncio.sleep(self.time_sleep)
+
         return results
+
 
 def open_ai_gen(
     gen_file,
     output_dir,
-    batch_size=8,
+    batch_size=16,
     api_key=None,
+    max_workers=5,
+    sleep_interval=50,
+    time_sleep=15,
     **kwargs
 ):
     if not api_key:
@@ -109,11 +142,19 @@ def open_ai_gen(
         os.makedirs(output_dir)
 
     # Initialize EmotionSimilarGen
-    generator = EmotionSimilarGen(gen_file=gen_file, batch_size=batch_size, api_key=api_key, **kwargs)
+    generator = EmotionSimilarGen(
+        gen_file=gen_file,
+        batch_size=batch_size,
+        api_key=api_key,
+        max_workers=max_workers,
+        sleep_interval=sleep_interval,
+        time_sleep=time_sleep,
+        **kwargs,
+    )
 
     # Generate sentences
     print("Generating sentences...")
-    results = generator.generate_sentences()
+    results = asyncio.run(generator.generate_sentences())
 
     # Write outputs to files
     with open(os.path.join(output_dir, "gen.json"), "w") as gen_json:
@@ -124,10 +165,11 @@ def open_ai_gen(
     processed = []
     for res in results:
         label = res["query"]["emotion"]
-        for new_sent in res["generation"].split("\n"):
-            if not new_sent.strip():
-                continue
-            processed.append([new_sent, emotion2label[label]])
+        if res["generation"]:
+            for new_sent in res["generation"].split("\n"):
+                if not new_sent.strip():
+                    continue
+                processed.append([new_sent, emotion2label[label]])
     
     random.shuffle(processed)
     
