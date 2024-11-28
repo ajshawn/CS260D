@@ -138,6 +138,11 @@ from simpletransformers.losses.loss_utils import init_loss
 # from simpletransformers.custom_models.models import ElectraForSequenceClassification
 
 from CREST.utils.submodular import get_orders_and_weights
+from llm_gen.open_ai.open_ai_gen import open_ai_gen
+from llm_gen.llm_generation.post_process import post_process_emotion_gen
+
+from dotenv import load_dotenv
+load_dotenv()
 
 try:
     import wandb
@@ -1243,11 +1248,25 @@ class ClassificationModel:
                 
                 with open(os.path.join(output_dir, f"coreset_clusters_epoch_{epoch_number + 1}.json"), "w") as f:
                     json.dump(core_ele2cluster, f, indent=2)
-                    
+
+                # Start LLM generation
+                n_gen=30
+                open_ai_api_key = os.getenv("OPENAI_API_KEY")
+                gen_file = os.path.join(output_dir, f"coreset_data_epoch_{epoch_number + 1}.json")
+                gen_output_dir = os.path.join(output_dir, f"llm_gen_epoch_{epoch_number + 1}")
+
+                open_ai_gen(
+                    gen_file=gen_file,
+                    output_dir=gen_output_dir,
+                    api_key=open_ai_api_key,
+                    n_gen=n_gen,
+                )
+                
+                # Post-process LLM generated data
+                # post_process_emotion_gen(os.join(gen_output_dir, "gen.json"))
 
                 # Save or log the gradients for further analysis
                 logger.info(f"Gradients recorded at epoch {epoch_number + 1}: {len(gradient_data)} data points.")
-
 
             epoch_number += 1
             output_dir_current = os.path.join(

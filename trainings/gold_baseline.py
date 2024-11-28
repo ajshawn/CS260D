@@ -8,7 +8,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 dataset_dir = 'data/emotion'
 
-train_df = pd.read_csv(f'{dataset_dir}/gen.csv')
+train_df = pd.read_csv(f'{dataset_dir}/gen_small.csv')
 eval_df = pd.read_csv(f'{dataset_dir}/dev.csv')
 
 # Create a ClassificationModel
