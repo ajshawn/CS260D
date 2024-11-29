@@ -139,7 +139,6 @@ from simpletransformers.losses.loss_utils import init_loss
 
 from CREST.utils.submodular import get_orders_and_weights
 from llm_gen.open_ai.open_ai_gen import open_ai_gen
-from llm_gen.llm_generation.post_process import post_process_emotion_gen
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -642,7 +641,7 @@ class ClassificationModel:
             show_running_loss=show_running_loss,
             eval_df=eval_df,
             verbose=verbose,
-            gradient_record_interval=self.args.gradient_record_interval or self.args.num_train_epochs,
+            gradient_record_interval=self.args.gradient_record_interval,
             **kwargs,
         )
 
