@@ -60,13 +60,13 @@ class EmotionSimilarGen:
         coreset = query["coreset"]
         prompt = f"""
 ## Role:
-You are a natural language processing expert, skilled at generating multiple sentences with the emotion {emotion} in Twitter style that are similar to the coreset reference.
+You are a natural language processing expert, skilled at generating more diverse sentences with the emotion {emotion} in Twitter style that are different to the coreset reference.
 
 ## Task:
 Given the emotion {emotion}, and coreset reference:
 {coreset}
 
-Now generate {self.n_gen_per_inference} sentences that are similar to the coreset reference.
+Now generate {self.n_gen_per_inference} sentences that are different to the coreset reference to increase the diversity of the dataset.
 
 ## Note:
 1. The sentences should be in Twitter style and as diverse as possible.
@@ -120,7 +120,7 @@ Now generate {self.n_gen_per_inference} sentences that are similar to the corese
                 if i + self.sleep_interval < len(self.queries):
                     print(f"Pausing for {self.time_sleep} seconds...")
                     await asyncio.sleep(self.time_sleep)
-
+                                
         return results
 
 
@@ -131,7 +131,7 @@ def open_ai_gen(
     api_key=None,
     max_workers=5,
     sleep_interval=50,
-    time_sleep=15,
+    time_sleep=10,
     **kwargs
 ):
     if not api_key:

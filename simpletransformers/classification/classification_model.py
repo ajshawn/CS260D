@@ -671,8 +671,8 @@ class ClassificationModel:
         verbose=True,
         gradient_record_interval=None,  # Interval for gradient recording
         coreset_ratio=0.1,
-        time_sleep=15,
-        time_sleep_delta=5,
+        time_sleep=10,
+        time_sleep_delta=0,
         **kwargs,
     ):
         """

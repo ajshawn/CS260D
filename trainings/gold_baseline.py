@@ -8,7 +8,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 dataset_dir = 'data/emotion'
 
-train_df = pd.read_csv(f'{dataset_dir}/gen_small.csv')
+train_df = pd.read_csv(f'{dataset_dir}/gen_6000.csv')
 eval_df = pd.read_csv(f'{dataset_dir}/dev.csv')
 
 # Create a ClassificationModel
@@ -21,11 +21,11 @@ model = ClassificationModel(
         "overwrite_output_dir": True,
         "train_batch_size": 16,
         "eval_batch_size": 16,
-        "num_train_epochs": 10,
+        "num_train_epochs": 50,
         "n_gpu": 1,
-        # "wandb_project": "CS260D",
+        "wandb_project": "CS260D",
         "evaluate_during_training" : True,
-        "evaluate_during_training_steps" : 2000,
+        "evaluate_during_training_steps" : 200,
         "use_multiprocessing": False,
         "use_multiprocessing_for_evaluation": False,
     },
@@ -36,6 +36,6 @@ model.train_model(
     train_df=train_df,
     eval_df=eval_df,
     args={
-        "gradient_record_interval": 1,
+        "gradient_record_interval": 10,
     },
 )
