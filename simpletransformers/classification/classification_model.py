@@ -642,6 +642,7 @@ class ClassificationModel:
             eval_df=eval_df,
             verbose=verbose,
             gradient_record_interval=self.args.gradient_record_interval,
+            prev_df_path=self.args.prev_df_path,
             **kwargs,
         )
 
@@ -669,10 +670,11 @@ class ClassificationModel:
         eval_df=None,
         test_df=None,
         verbose=True,
-        gradient_record_interval=None,  # Interval for gradient recording
+        gradient_record_interval=None,
         coreset_ratio=0.1,
-        time_sleep=10,
+        time_sleep=5,
         time_sleep_delta=0,
+        prev_df_path=None,
         **kwargs,
     ):
         """
@@ -843,6 +845,7 @@ class ClassificationModel:
         epochs_trained = 0
         n_augmentation = 0
         current_loss = "Initializing"
+        prev_df = pd.read_csv(prev_df_path) if prev_df_path else None
 
         if args.model_name and os.path.exists(args.model_name):
             try:
@@ -903,150 +906,13 @@ class ClassificationModel:
                 f"Epoch {epoch_number + 1} of {args.num_train_epochs}"
             )
 
-            # Gradient recording and dynamic data augmentation step
-            if gradient_record_interval is not None and epoch_number % gradient_record_interval == 0:
-                gradient_data = []
-                data_counter = 0
-                # Assuming `model` is a Hugging Face Transformer model
-                for idx, batch in tqdm(enumerate(train_dataloader), desc="Recording gradients", disable=args.silent, total=len(train_dataloader)):
-                    inputs = self._get_inputs_dict(batch)
-
-                    # Ensure the model outputs hidden states
-                    outputs = model(**inputs, output_hidden_states=True)
-
-                    # Access the penultimate layer's activations from hidden_states
-                    # Note: hidden_states is a tuple where the last element is the final layer's input
-                    # and the second-to-last element is the penultimate layer's output
-                    penultimate_activations = outputs.hidden_states[-2]  # Second-to-last layer
-                    penultimate_activations.requires_grad_(True)  # Enable gradient tracking
-
-                    logits = outputs.logits  # Final layer outputs (classification/regression scores)
-                    labels = inputs["labels"]
-
-                    # Compute the loss
-                    loss_fn = self.loss_fct if self.loss_fct else torch.nn.CrossEntropyLoss()
-                    loss = loss_fn(logits, labels)
-
-                    # Compute gradients w.r.t. the penultimate layer activations
-                    gradients = torch.autograd.grad(
-                        outputs=loss,
-                        inputs=penultimate_activations,
-                        grad_outputs=torch.ones_like(loss),
-                        create_graph=False,
-                        retain_graph=False,
-                    )[0]  # Access the gradient tensor from the tuple
-
-                    # Aggregate gradients and associate them with the sentence
-                    batch_size, seq_len, hidden_dim = gradients.shape
-
-                    for b in range(batch_size):
-                        sentence_gradient = gradients[b].cpu().numpy()  # Gradients for the sentence
-                        input_sentence = inputs["input_ids"][b].cpu().numpy()  # Input IDs for the sentence
-
-                        # Get gradient corresponding to the [CLS] token
-                        sentence_gradient = sentence_gradient[0]
-
-                        gradient_data.append({
-                            "index": data_counter,  # Index ID for the sentence
-                            "data_point": input_sentence,  # Full sentence (input IDs)
-                            "gradient": sentence_gradient,  # Gradients for the sentence
-                            "label": labels[b].item(),  # Label for the sentence
-                        })
-
-                        data_counter += 1
-
-                # Begin coreset selection with the recorded gradients
-                budget = int(coreset_ratio * len(gradient_data))
-
-                order_mg, weights_mg, order_sz, weights_sz, ordering_time, similarity_time, assignments = get_orders_and_weights(
-                    B=budget,
-                    X=np.array([d["gradient"].flatten() for d in gradient_data]),
-                    metric="cosine",
-                    y=np.array([d["label"] for d in gradient_data]),
-                )
-
-                label2coreset = defaultdict(list)
-                for coreset_ele in tqdm(order_mg, desc="Building coreset", disable=args.silent):
-                    label = gradient_data[coreset_ele]["label"]
-                    input_ids = gradient_data[coreset_ele]["data_point"]
-                    label2coreset[label].append(self.tokenizer.decode(input_ids, skip_special_tokens=True))
-
-                # Record clusters
-                core_ele2cluster = defaultdict(list)
-                for idx, assign in tqdm(enumerate(assignments), desc="Building clusters", disable=args.silent, total=len(assignments)):
-                    if assign == -1:
-                        continue
-                    core_ele2cluster[assign].append(self.tokenizer.decode(gradient_data[idx]["data_point"], skip_special_tokens=True))
-                # Decode keys
-                core_ele2cluster = {self.tokenizer.decode(gradient_data[k]["data_point"], skip_special_tokens=True): v for k, v in core_ele2cluster.items()}
-
-                # Save the coreset data
-                with open(os.path.join(output_dir, f"coreset_data_epoch_{epoch_number + 1}.json"), "w") as f:
-                    json.dump(label2coreset, f, indent=2)
-                
-                with open(os.path.join(output_dir, f"coreset_clusters_epoch_{epoch_number + 1}.json"), "w") as f:
-                    json.dump(core_ele2cluster, f, indent=2)
-
-                # Start LLM generation
-                n_gen=len(gradient_data)-budget
-                open_ai_api_key = os.getenv("OPENAI_API_KEY")
-                gen_file = os.path.join(output_dir, f"coreset_data_epoch_{epoch_number + 1}.json")
-                gen_output_dir = os.path.join(output_dir, f"llm_gen_epoch_{epoch_number + 1}")
-
-                open_ai_gen(
-                    gen_file=gen_file,
-                    output_dir=gen_output_dir,
-                    api_key=open_ai_api_key,
-                    n_gen=n_gen,
-                    time_sleep=time_sleep + n_augmentation * time_sleep_delta,
-                )
-
-                # Prepare new dataset
-                gen_path = os.path.join(gen_output_dir, "gen.csv")
-                if os.path.exists(gen_path):
-                    new_train_df = pd.read_csv(gen_path)
-                else:
-                    raise FileNotFoundError(f"Generated data file not found at {gen_path}")
-
-                # Convert `label2coreset` to a DataFrame
-                coreset_data = []
-                for label, subset in label2coreset.items():
-                    for sent in subset:
-                        coreset_data.append({"text": sent, "labels": label})
-
-                coreset_df = pd.DataFrame(coreset_data)
-
-                # Combine the generated dataset and coreset
-                new_train_df = pd.concat([new_train_df, coreset_df], ignore_index=True)
-
-                # Update dataloader with new dataset
-                train_examples = (
-                    new_train_df["text"].astype(str).tolist(),
-                    new_train_df["labels"].tolist(),
-                )
-                new_dataset = self.load_and_cache_examples(train_examples, verbose=verbose)
-
-                train_sampler = RandomSampler(new_dataset)
-                train_dataloader = DataLoader(
-                    new_dataset,
-                    sampler=train_sampler,
-                    batch_size=self.args.train_batch_size,
-                    num_workers=self.args.dataloader_num_workers,
-                )
-
-                n_augmentation += 1
-
-                # Save or log the gradients for further analysis
-                logger.info(f"Gradients recorded and data dynamically augmented for epoch {epoch_number + 1}")
-
-
             batch_iterator = tqdm(
                 train_dataloader,
                 desc=f"Running Epoch {epoch_number + 1} of {args.num_train_epochs}",
                 disable=args.silent,
                 mininterval=0,
             )
-                
+  
             for step, batch in enumerate(batch_iterator):
                 if steps_trained_in_current_epoch > 0:
                     steps_trained_in_current_epoch -= 1
@@ -1306,7 +1172,140 @@ class ClassificationModel:
                                         )
                         model.train()
 
+            # Gradient recording and dynamic data augmentation step
+            if gradient_record_interval is not None and (epoch_number+1) % gradient_record_interval == 0:
+                gradient_data = []
+                data_counter = 0
+                # Assuming `model` is a Hugging Face Transformer model
+                for idx, batch in tqdm(enumerate(train_dataloader), desc="Recording gradients", disable=args.silent, total=len(train_dataloader)):
+                    inputs = self._get_inputs_dict(batch)
+
+                    # Ensure the model outputs hidden states
+                    outputs = model(**inputs, output_hidden_states=True)
+
+                    # Access the penultimate layer's activations from hidden_states
+                    # Note: hidden_states is a tuple where the last element is the final layer's input
+                    # and the second-to-last element is the penultimate layer's output
+                    penultimate_activations = outputs.hidden_states[-2]  # Second-to-last layer
+                    penultimate_activations.requires_grad_(True)  # Enable gradient tracking
+
+                    logits = outputs.logits  # Final layer outputs (classification/regression scores)
+                    labels = inputs["labels"]
+
+                    # Compute the loss
+                    loss_fn = self.loss_fct if self.loss_fct else torch.nn.CrossEntropyLoss()
+                    loss = loss_fn(logits, labels)
+
+                    # Compute gradients w.r.t. the penultimate layer activations
+                    gradients = torch.autograd.grad(
+                        outputs=loss,
+                        inputs=penultimate_activations,
+                        grad_outputs=torch.ones_like(loss),
+                        create_graph=False,
+                        retain_graph=False,
+                    )[0]  # Access the gradient tensor from the tuple
+
+                    # Aggregate gradients and associate them with the sentence
+                    batch_size, seq_len, hidden_dim = gradients.shape
+
+                    for b in range(batch_size):
+                        sentence_gradient = gradients[b].cpu().numpy()  # Gradients for the sentence
+                        input_sentence = inputs["input_ids"][b].cpu().numpy()  # Input IDs for the sentence
+
+                        # Get gradient corresponding to the [CLS] token
+                        sentence_gradient = sentence_gradient[0]
+
+                        gradient_data.append({
+                            "index": data_counter,  # Index ID for the sentence
+                            "data_point": input_sentence,  # Full sentence (input IDs)
+                            "gradient": sentence_gradient,  # Gradients for the sentence
+                            "label": labels[b].item(),  # Label for the sentence
+                        })
+
+                        data_counter += 1
+
+                # Begin coreset selection with the recorded gradients
+                # budget = int(coreset_ratio * len(gradient_data)
+                budget = 600
+
+                order_mg, weights_mg, order_sz, weights_sz, ordering_time, similarity_time, assignments = get_orders_and_weights(
+                    B=budget,
+                    X=np.array([d["gradient"].flatten() for d in gradient_data]),
+                    metric="cosine",
+                    y=np.array([d["label"] for d in gradient_data]),
+                )
+
+                label2coreset = defaultdict(list)
+                for coreset_ele in tqdm(order_mg, desc="Building coreset", disable=args.silent):
+                    label = gradient_data[coreset_ele]["label"]
+                    input_ids = gradient_data[coreset_ele]["data_point"]
+                    label2coreset[label].append(self.tokenizer.decode(input_ids, skip_special_tokens=True))
+
+                # Record clusters
+                core_ele2cluster = defaultdict(list)
+                for idx, assign in tqdm(enumerate(assignments), desc="Building clusters", disable=args.silent, total=len(assignments)):
+                    if assign == -1:
+                        continue
+                    core_ele2cluster[assign].append(self.tokenizer.decode(gradient_data[idx]["data_point"], skip_special_tokens=True))
+                # Decode keys
+                core_ele2cluster = {self.tokenizer.decode(gradient_data[k]["data_point"], skip_special_tokens=True): v for k, v in core_ele2cluster.items()}
+
+                # Save the coreset data
+                with open(os.path.join(output_dir, f"coreset_data_epoch_{epoch_number + 1}.json"), "w") as f:
+                    json.dump(label2coreset, f, indent=2)
+                
+                with open(os.path.join(output_dir, f"coreset_clusters_epoch_{epoch_number + 1}.json"), "w") as f:
+                    json.dump(core_ele2cluster, f, indent=2)
+
+                # Start LLM generation
+                n_gen=1500
+                open_ai_api_key = os.getenv("OPENAI_API_KEY")
+                gen_file = os.path.join(output_dir, f"coreset_data_epoch_{epoch_number + 1}.json")
+                gen_output_dir = os.path.join(output_dir, f"llm_gen_epoch_{epoch_number + 1}")
+
+                open_ai_gen(
+                    gen_file=gen_file,
+                    output_dir=gen_output_dir,
+                    api_key=open_ai_api_key,
+                    n_gen=n_gen,
+                    time_sleep=time_sleep + n_augmentation * time_sleep_delta,
+                )
+
+                # Prepare new dataset
+                gen_path = os.path.join(gen_output_dir, "gen.csv")
+                if os.path.exists(gen_path):
+                    new_train_df = pd.read_csv(gen_path)
+                else:
+                    raise FileNotFoundError(f"Generated data file not found at {gen_path}")
+
+                # Combine the generated dataset and previous dataset
+                new_train_df = pd.concat([new_train_df, prev_df], ignore_index=True)
+
+                # Update previous dataset
+                prev_df = new_train_df
+
+                # Update dataloader with new dataset
+                train_examples = (
+                    new_train_df["text"].astype(str).tolist(),
+                    new_train_df["labels"].tolist(),
+                )
+                new_dataset = self.load_and_cache_examples(train_examples, verbose=verbose)
+
+                train_sampler = RandomSampler(new_dataset)
+                train_dataloader = DataLoader(
+                    new_dataset,
+                    sampler=train_sampler,
+                    batch_size=self.args.train_batch_size,
+                    num_workers=self.args.dataloader_num_workers,
+                )
+
+                n_augmentation += 1
+
+                # Save or log the gradients for further analysis
+                logger.info(f"Gradients recorded and data dynamically augmented for epoch {epoch_number + 1}")
+
             epoch_number += 1
+
             output_dir_current = os.path.join(
                 output_dir,
                 "checkpoint-{}-epoch-{}".format(global_step, epoch_number),
