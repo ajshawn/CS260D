@@ -574,18 +574,15 @@ def open_ai_gen(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Initialize EmotionSimilarGen
-    # generator = EmotionDifferentFewShotGen(
-    #     gen_file=gen_file,
-    #     batch_size=batch_size,
-    #     api_key=api_key,
-    #     max_workers=max_workers,
-    #     sleep_interval=sleep_interval,
-    #     time_sleep=time_sleep,
-    #     **kwargs,
-    # )
-
-
+    generator = EmotionDifferentFewShotGen(
+        gen_file=gen_file,
+        batch_size=batch_size,
+        api_key=api_key,
+        max_workers=max_workers,
+        sleep_interval=sleep_interval,
+        time_sleep=time_sleep,
+        **kwargs,
+    )
 
     # Generate sentences
     print("Generating sentences...")
